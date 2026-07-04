@@ -127,6 +127,16 @@ def scaled_dot_product_attention(
             bits=cache.bits,
         )
     else:
+        # Dispatch to ANE via CoreML if the dispatcher is installed (turboquant-mlx).
+        # Falls back to mx.fast.scaled_dot_product_attention when ANE is unavailable,
+        # during prefill, or when seq_len exceeds the largest compiled bucket.
+        try:
+            from turboquant_mlx.stream.ane_loader import get_dispatcher_if_active
+            dispatcher = get_dispatcher_if_active()
+            if dispatcher is not None:
+                return dispatcher(queries, keys, values, scale=scale, mask=mask)
+        except ImportError:
+            pass
         return mx.fast.scaled_dot_product_attention(
             queries,
             keys,

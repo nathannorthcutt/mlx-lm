@@ -207,7 +207,8 @@ class Qwen3MoeModel(nn.Module):
             # and avoid building a single 94-layer computation graph that exceeds
             # device memory limits on machines where the model is near the RAM ceiling.
             mx.eval(h)
-            mx.clear_cache()
+            if callable(getattr(mx, "clear_cache", None)):
+                mx.clear_cache()
 
         return self.norm(h)
 

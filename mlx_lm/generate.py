@@ -254,7 +254,31 @@ def wired_limit(model: nn.Module, streams: Optional[List[mx.Stream]] = None):
                 "MB. This can be slow. See the documentation for possible work-arounds: "
                 "https://github.com/ml-explore/mlx-lm/tree/main#large-models"
             )
-        old_limit = mx.set_wired_limit(max_rec_size)
+            # Diagnostic: walk the module tree to find where the large bytes live.
+            import os as _os
+            if _os.environ.get("TQ_MEM_DIAG", "0") == "1":
+                def _walk(obj, path, depth=0):
+                    if depth > 6:
+                        return
+                    sz = tree_reduce(
+                        lambda a, x: a + x.nbytes if isinstance(x, mx.array) else a,
+                        obj, 0,
+                    )
+                    if sz < 50 * 2**20:
+                        return
+                    print(f"[tq-diag] param-tree  {path:55s}  {sz // 2**20:8d} MB", flush=True)
+                    if isinstance(obj, nn.Module):
+                        for k, v in obj.__dict__.items():
+                            if not k.startswith("_") and (isinstance(v, (nn.Module, mx.array, list, dict))):
+                                _walk(v, f"{path}.{k}", depth + 1)
+                    elif isinstance(obj, list):
+                        for i, item in enumerate(obj):
+                            _walk(item, f"{path}[{i}]", depth + 1)
+                    elif isinstance(obj, dict):
+                        for k, v in obj.items():
+                            _walk(v, f"{path}[{k!r}]", depth + 1)
+                _walk(model, "model", depth=0)
+        old_limit = mx.set_wired_limit(max(max_rec_size, model_bytes))
         try:
             yield
         finally:

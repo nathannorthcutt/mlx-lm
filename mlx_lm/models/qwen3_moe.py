@@ -203,6 +203,10 @@ class Qwen3MoeModel(nn.Module):
 
         for layer, c in zip(self.layers, cache):
             h = layer(h, mask, c)
+            # Force evaluation after each layer to free intermediate Metal buffers
+            # and avoid building a single 94-layer computation graph that exceeds
+            # device memory limits on machines where the model is near the RAM ceiling.
+            mx.eval(h)
 
         return self.norm(h)
 

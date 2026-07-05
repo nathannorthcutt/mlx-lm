@@ -254,31 +254,59 @@ def wired_limit(model: nn.Module, streams: Optional[List[mx.Stream]] = None):
                 "MB. This can be slow. See the documentation for possible work-arounds: "
                 "https://github.com/ml-explore/mlx-lm/tree/main#large-models"
             )
-            # Diagnostic: walk the module tree to find where the large bytes live.
+            # Diagnostic: walk the parameter tree to find which submodules hold
+            # the large arrays. Uses nn.Module.parameters() to get the leaf
+            # arrays, then identifies the heaviest direct children.
             import os as _os
             if _os.environ.get("TQ_MEM_DIAG", "0") == "1":
-                def _walk(obj, path, depth=0):
-                    if depth > 6:
-                        return
-                    sz = tree_reduce(
+                def _sz(obj):
+                    return tree_reduce(
                         lambda a, x: a + x.nbytes if isinstance(x, mx.array) else a,
                         obj, 0,
                     )
-                    if sz < 50 * 2**20:
+                def _walk_module(mod, path, depth=0):
+                    if depth > 5:
                         return
-                    print(f"[tq-diag] param-tree  {path:55s}  {sz // 2**20:8d} MB", flush=True)
-                    if isinstance(obj, nn.Module):
-                        for k, v in obj.__dict__.items():
-                            if not k.startswith("_") and (isinstance(v, (nn.Module, mx.array, list, dict))):
-                                _walk(v, f"{path}.{k}", depth + 1)
-                    elif isinstance(obj, list):
-                        for i, item in enumerate(obj):
-                            _walk(item, f"{path}[{i}]", depth + 1)
-                    elif isinstance(obj, dict):
-                        for k, v in obj.items():
-                            _walk(v, f"{path}[{k!r}]", depth + 1)
-                _walk(model, "model", depth=0)
-        old_limit = mx.set_wired_limit(max(max_rec_size, model_bytes))
+                    # MLX stores sub-modules via the normal attribute protocol;
+                    # parameters() exposes them. Scan the module's own attributes
+                    # by looking at its parameter dict keys at the top level.
+                    try:
+                        params = mod.parameters()   # nested dict
+                    except Exception:
+                        return
+                    if not isinstance(params, dict):
+                        return
+                    for k, v in params.items():
+                        child_path = f"{path}.{k}"
+                        if isinstance(v, dict):
+                            # v is a sub-module's param dict — find the actual child
+                            child_mod = getattr(mod, k, None)
+                            if child_mod is None:
+                                continue
+                            csz = _sz(child_mod)
+                            if csz >= 50 * 2**20:
+                                print(f"[tq-diag] param-tree  {child_path:55s}  {csz // 2**20:8d} MB", flush=True)
+                                _walk_module(child_mod, child_path, depth + 1)
+                        elif isinstance(v, list):
+                            # list of sub-module param dicts (e.g. layers)
+                            child_list = getattr(mod, k, None)
+                            if not isinstance(child_list, list):
+                                continue
+                            csz = _sz(child_list)
+                            if csz >= 50 * 2**20:
+                                print(f"[tq-diag] param-tree  {child_path:55s}  {csz // 2**20:8d} MB  [{len(child_list)} items]", flush=True)
+                                if depth < 3:
+                                    for i, item in enumerate(child_list):
+                                        if isinstance(item, nn.Module):
+                                            isz = _sz(item)
+                                            if isz >= 50 * 2**20:
+                                                print(f"[tq-diag] param-tree  {child_path}[{i}]:55s  {isz // 2**20:8d} MB", flush=True)
+                        elif isinstance(v, mx.array):
+                            vsz = v.nbytes
+                            if vsz >= 50 * 2**20:
+                                print(f"[tq-diag] param-tree  {child_path:55s}  {vsz // 2**20:8d} MB  shape={list(v.shape)} dtype={v.dtype}", flush=True)
+                _walk_module(model, "model", depth=0)
+        old_limit = mx.set_wired_limit(max_rec_size)
         try:
             yield
         finally:
